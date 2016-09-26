@@ -1,0 +1,6 @@
+--2016-09-25 23:20:39--  https://www.kaggle.com/c/melbourne-university-seizure-prediction/download/train_1.zip
+Resolving www.kaggle.com (www.kaggle.com)... 168.62.224.124
+Connecting to www.kaggle.com (www.kaggle.com)|168.62.224.124|:443... connected.
+ERROR: cannot verify www.kaggle.com's certificate, issued by ‘CN=RapidSSL SHA256 CA - G3,O=GeoTrust Inc.,C=US’:
+  Unable to locally verify the issuer's authority.
+To connect to www.kaggle.com insecurely, use `--no-check-certificate'.
