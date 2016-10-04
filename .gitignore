@@ -1,3 +1,4 @@
 # ignore download directory
 download/
 inputfiles/
+*.so

@@ -1,0 +1,5 @@
+#!/bin/sh
+
+export PATH=/usr/local/cuda/bin:$PATH
+
+nvcc -O3 -arch=sm_30 -G -I/usr/local/cuda/include -I/usr/share/R/include -L/usr/lib -lR -L/usr/local/cuda/lib64 -lcufft --shared -Xcompiler -fPIC -o cufft.so cufft-R.cu
