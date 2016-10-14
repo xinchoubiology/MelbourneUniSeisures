@@ -1,72 +1,80 @@
-setwd("~/Documents/R Work/kaggle_seizures")
-
+setwd("~/MelbourneUniSeisures")
 library(R.matlab)
 library(data.table)
 library(parallel)
+library(stringr)
+library(seewave)
+library(fftw)
 
-window <- function(x, location, width){
-  pmax(0,1 - 2 * abs(x-location) / width)
+
+# helper functions
+
+cepstrumCoefs <- function(x,filterBank, fftPlan, dctPlan){
+  power <- abs(FFT(x, plan=fftPlan)[1:(length(x)/2)])^2
+  DCT(log(as.vector(t(filterBank) %*% power)), plan=dctPlan, type=2)
 }
 
-cepstrumCoefs <- function(spec,freq,N){
-  width <- 0.5 / (N-1)  # actually half width but whatever
-  location <- seq(0,0.5,length.out = N)
-  sapply(location, function(x){
-    sum(pmax(0,1 - abs(freq-x) / width) * spec)
-  })
-}
 
-buildDataSet <- function(dirs,N){
-  # reads all .mat files from a list of directorys and builds feature data.table
-  rbindlist(lapply(dirs,function(y){
-    #for each directory read each file
-    files <- dir(y)
-    
-    
-    rbindlist(mclapply(files, function(x){
-      cat(paste("\n",x,"\n"))
-      #for each file read the data and convert to data.table
-      data <- readMat(paste(y,"/",x,sep=""))
-      data <- data.table(matrix(data[[1]][1][[1]],ncol=16))
-      for (i in names(data))
-        data[get(i)==0,i:=NA,with=FALSE]
-      
-      data <- data[complete.cases(data)]
-      if(nrow(data) < 5000) return() # blast on past if there's nothing to see
-      
-      out <- data.table(id = x)
-      
-      channels <- 1:16
-      
-      for(ch in channels){
-        #cat(paste(" ",ch))
-        pergram <- spectrum(data[,paste("V",ch,sep=""), with=F], plot=F) 
-        out[,paste("CH",ch,"FR",1:N,sep="") := as.list(cepstrumCoefs(pergram$spec, pergram$freq, N))]
-      }
-      
-      corMat <- cor(data)
-      out[,paste("COR",1:120,sep="") := as.list(corMat[lower.tri(corMat)])]
-      
-      return(out)
-      
-    }, mc.cores=8))
+buildMFCCInputData <- function(dirList, nSteps, blockSize, nMFCC, MFCCBank, fftPlan, dctPlan){
+  
+  # list all the files in that directory
+  fileList <- unlist(sapply(dirList, function(dir){
+    if(!(dir %in% dir(downloadDir))) dir.create(paste(downloadDir,dir,sep=""))
+    paste(dir,"/", word(system(paste(
+      "aws s3 ls ", s3URI, downloadDir, dir,"/", sep=''
+    ), intern = T),-1),sep="")
   }))
+  
+  fileList <- head(fileList,3)
+  
+  MFCCBank <- melfilterbank(f=16000,wl=blockSize,m=nMFCC)$amp
+  fftPlan <- planFFT(blockSize, effort = 3)
+  dctPlan <- planDCT(nMFCC, type = 2, effort =3)
+  
+  write.table(fileList, file=paste("./",inputFilesDir,"fileNames.lst",sep=""),
+              quote=F, row.names = F, col.names = F)
+  
+  nCores <- detectCores()
+  
+  out <- rbindlist(mclapply(fileList, function(file){
+    # cat(paste("\n",file,"\n"))
+    # for each file download, read the data and convert to data.table
+    system(paste("aws s3 cp ",s3URI,downloadDir,file," ./",downloadDir,file, sep = ""))
+    data <- readMat(paste("./",downloadDir,file, sep = ""))
+    file.remove(paste("./",downloadDir,file, sep = ""))
+    
+    data <- as.data.table(data$dataStruct[[1]])
+    nChannels <- ncol(data)
+    nSamples <- nrow(data)
+    step <- (nSamples - blockSize) / (nSteps - 1)
+    
+    tmp <- array(0,c(nChannels,nSteps,nMFCC))
+    
+    for(iStep in 1:nSteps){
+      startSample <- round(1 + (iStep-1)*step)
+      endSample <- startSample + blockSize - 1
+      for(iChannel in 1:nChannels){
+        # for each channel at this step calculate the MFCCs
+        tmp[iChannel, iStep, ]  <- cepstrumCoefs(
+          data[startSample:endSample,get(paste("V",iChannel,sep=""))], MFCCBank,
+          fftPlan, dctPlan)
+      }
+    }
+    #convert to data.table
+    DT <-setDT(as.list(tmp))
+    rm(tmp)
+    gc()
+    DT
+  }, mc.cores=nCores))
+  fwrite(out, file=paste("./",inputFilesDir,"data.csv",sep=""),
+         quote=F, col.names = F)
+  rm(out)
+  gc()
 }
 
-downloadDir <- "./download"
+source("./modelData.R")
+buildMFCCInputData(trainDirs, nSteps, blockSize, nMFCC, MFCCBank, fftPlan, dctPlan)
 
-trainDirs <- paste(downloadDir,"/train_",1:3,sep="")
-testDirs <- paste(downloadDir,"/test_",1:3,sep="")
 
-N <- 100
 
-train <- buildDataSet(trainDirs, N)
-train[,subject := as.numeric(substr(id,1,1))]
-train[,label := as.numeric(substr(id,nchar(id)-4,nchar(id)-4))]
-
-write.csv(train,file="train.csv", row.names=FALSE)
-
-test <- buildDataSet(testDirs, N)
-test[,subject := as.numeric(substr(id,1,1))]
-write.csv(test,file="test.csv", row.names=FALSE)
 
