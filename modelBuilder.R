@@ -1,46 +1,74 @@
 library(mxnet)
 
-resNetUnit <- function(input, kernel, stride, depth, stepUnit=FALSE, pad=c(0,0)){
+resNetUnit <- function(input, kernel, stride, depth, stepUnit=FALSE, pad=c(0,0), name =""){
+  eps <- 2e-5
+  bn_mom <- 0.9
+  fix_gamma <- FALSE
   
   #Res unit
-  BN1 <- mx.symbol.BatchNorm(input, name="BN1")
-  conv1 <- mx.symbol.Convolution(BN1, kernel=kernel, num_filter=depth, no.bias=TRUE, pad=pad)
-  relu1 <- mx.symbol.Activation(conv1, act_type='relu')
-  BN2 <- mx.symbol.BatchNorm(relu1, name="BN2")
-  conv2 <- mx.symbol.Convolution(BN2, kernel=kernel, num_filter=depth, no.bias=TRUE)
-  relu2 <- mx.symbol.Activation(conv2, act_type='relu')
+  BN1 <- mx.symbol.BatchNorm(input, fix.gamma = fix_gamma, name = paste(name,"BN1",sep=""))
+  relu1 <- mx.symbol.Activation(BN1, act_type='relu', name = paste(name,"relu1",sep=""))
+  conv1 <- mx.symbol.Convolution(relu1, kernel=kernel, stride = stride, num_filter=depth, 
+                                 no.bias=TRUE, pad=pad, name = paste(name,"conv1",sep=""))
+  BN2 <- mx.symbol.BatchNorm(conv1, fix.gamma = fix_gamma, name = paste(name,"BN2",sep=""))
+  relu2 <- mx.symbol.Activation(BN2, act_type='relu', name = paste(name,"relu2",sep=""))
+  conv2 <- mx.symbol.Convolution(relu2, kernel=kernel, stride=c(1,1), num_filter=depth, 
+                                 no.bias=TRUE, pad=pad, name = paste(name,"conv2",sep=""))
   
   #skip transform if needed
-  if(stepUnit) input <- mx.symbol.Convolution(input, kernel=kernel, num_filter=depth, no.bias=TRUE)
+  if(stepUnit) input <- mx.symbol.Convolution(input, kernel=kernel, stride = stride, num_filter=depth, 
+                                              no.bias=TRUE, pad=pad, name = paste(name,"step",sep=""))
   
-  input + relu2
+  input + conv2
   
 }
 
-resNetBlock <- function(input, kernel, stride, depth, stepUnit=TRUE, nUnits, pad=c(0,0)){
+resNetBlock <- function(input, kernel, stride, depth, nUnits, stepUnit=TRUE, pad=c(0,0), name =""){
   
   for(i in 1:nUnits){
     if(i==1){
-      input <- resNetUnit(input, kernel, stride, depth, stepUnit=stepUnit, pad=pad)
+      input <- resNetUnit(input, kernel, stride, depth, stepUnit=stepUnit, pad=pad, name = paste(name,"unit",i,sep=""))
     } else {
-      input <- resNetUnit(input, kernel, stride, depth)
+      input <- resNetUnit(input, kernel, stride=c(1,1), depth, pad=pad, name = paste(name,"unit",i,sep=""))
     }
   }
   input
 }
 
-
-input <- mx.symbol.Variable("input")
-
-block1 <- resNetBlock(input, kernel=c(9,1), stride=c(2,1), depth=64, nUnits=3, pad=c(4,0))
-pool1 <- mx.symbol.Pooling(block1, kernel=c(2,1), stride=c(2,1), pool_type = 'max')
-
-block2 <- resNetBlock(pool1, kernel=c(9,1), stride=c(2,1), depth=32, nUnits=3)
-pool2 <- mx.symbol.Pooling(block2, kernel=c(2,1), stride=c(2,1), pool_type = 'max')
-
-block3 <- resNetBlock(pool2, kernel=c(9,1), stride=c(2,1), depth=16, nUnits=3)
-pool3 <- mx.symbol.Pooling(block3, kernel=c(2,1), stride=c(2,1), pool_type = 'max')
-
-flattenPool3 <- mx.symbol.Flatten(pool3)
-fc1 <- mx.symbol.FullyConnected(flattenPool3, num_hidden=1, name="fc1")
-logReg <- mx.symbol.LogisticRegressionOutput(fc1, name="logReg")
+resNetNet <- function(nThinBlocks, nFatBlocks, kernel, stride, depth, nUnits, pad, pool, poolKernel, poolStride,
+                      cropKernel, cropStride, dim, name=""){
+  
+  data <- mx.symbol.Variable("data")
+  data <- mx.symbol.BatchNorm(data=data, fix_gamma=TRUE, eps=2e-5, momentum=0.9, name='bn_data')
+  
+  factor <- 1
+  for(i in 1:nThinBlocks){
+    factor <- factor / stride[[i]][1]
+    data <- resNetBlock(data, kernel[[i]], stride[[i]], depth[i], stepUnit=TRUE, nUnits[i], pad=pad[[i]], 
+                         name = paste(name,"block",i,sep=""))
+    if(pool[i]){
+      factor <- factor / poolStride[[i]][1]
+      data <- mx.symbol.Pooling(data, kernel=poolKernel[[i]], stride=poolStride[[i]], pool_type = 'max', 
+                                           name = paste(name,"pool",i,sep=""))
+    }
+  }
+  shape <- c(dim[1]*factor,1,depth[nThinBlocks]*dim[2],-1)
+  data <- mx.symbol.Reshape(data=data, shape=shape)
+  
+  for(i in ((1:nFatBlocks)+nThinBlocks)){
+    data <- resNetBlock(data, kernel[[i]], stride[[i]], depth[i], stepUnit=TRUE, nUnits[i], pad=pad[[i]], 
+                        name = paste(name,"block",i,sep=""))
+    if(pool[i]) data <- mx.symbol.Pooling(data, kernel=poolKernel[[i]], stride=poolStride[[i]], pool_type = 'max', 
+                                          name = paste(name,"pool",i,sep=""))
+  }
+  
+  
+  data <- mx.symbol.BatchNorm(data=data, fix_gamma=TRUE, eps=2e-5, momentum=0.9, name='bn_out')
+  data <- mx.symbol.Dropout(data=data, p=0.2)
+  data <- mx.symbol.Convolution(data, no.bias=TRUE, kernel=cropKernel, stride =cropStride,
+                                num_filter=1, name=paste(name,"cropConv",sep=""))
+  data <- mx.symbol.Pooling(data, kernel=c(8,1), global.pool=TRUE, pool.type='avg')
+  data <- mx.symbol.Flatten(data)
+  logreg <- mx.symbol.LogisticRegressionOutput(data)
+  return(logreg)
+}
